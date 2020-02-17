@@ -19,21 +19,23 @@ import copy
 import logging
 import math
 
-from backtesting.backtesting_util import create_blank_config_using_loaded_one
 from backtesting.strategy_optimizer.strategy_test_suite import StrategyTestSuite
 from backtesting.strategy_optimizer.test_suite_result import TestSuiteResult
-from config import CONFIG_TRADER_RISK, CONFIG_TRADING, CONFIG_FORCED_EVALUATOR, CONFIG_FORCED_TIME_FRAME, \
-    CONFIG_EVALUATOR, FORCE_ASYNCIO_DEBUG_OPTION
-from evaluator import Strategies
-from evaluator import TA
-from evaluator.Strategies.strategies_evaluator import StrategiesEvaluator
-from evaluator.TA.TA_evaluator import TAEvaluator
-from octobot_commons.tentacles_management import AdvancedManager
+from octobot_commons.data_util import mean
+from octobot_evaluators.api import create_evaluator_classes
+from octobot_evaluators.api.initialization import matrix_channel_exists, create_matrix_channels
+from octobot_trading.api.modes import init_trading_mode_config, get_activated_trading_mode
+from octobot_trading.constants import CONFIG_TRADER_RISK, CONFIG_TRADING
+from octobot_evaluators.constants import CONFIG_FORCED_EVALUATOR, CONFIG_FORCED_TIME_FRAME, CONFIG_EVALUATOR
+from config import FORCE_ASYNCIO_DEBUG_OPTION
+from tentacles.Evaluator import Strategies
+from tentacles.Evaluator import TA
+from octobot_evaluators.evaluator.strategy_evaluator import StrategyEvaluator
+from octobot_evaluators.evaluator.TA_evaluator import TAEvaluator
 from octobot_commons.tentacles_management.class_inspector import get_class_from_string, evaluator_parent_inspection
-from tools.data_util import DataUtil
 from octobot_commons.logging.logging_util import get_logger
 from octobot_commons.logging.logging_util import set_global_logger_level, get_global_logger_level
-from trading.util.trading_config_util import get_activated_trading_mode
+from octobot_commons.constants import CONFIG_TRADING_FILE_PATH
 
 CONFIG = 0
 RANK = 1
@@ -48,10 +50,11 @@ class StrategyOptimizer:
     def __init__(self, config, strategy_name):
         self.is_properly_initialized = False
         self.logger = get_logger(self.get_name())
-        AdvancedManager.init_advanced_classes_if_necessary(config)
-        self.trading_mode = get_activated_trading_mode(config)
-        self.config = create_blank_config_using_loaded_one(config)
-        self.strategy_class = get_class_from_string(strategy_name, StrategiesEvaluator,
+        self.config = config
+        init_trading_mode_config(self.config, CONFIG_TRADING_FILE_PATH)
+        create_evaluator_classes(self.config)
+        self.trading_mode = get_activated_trading_mode(self.config)
+        self.strategy_class = get_class_from_string(strategy_name, StrategyEvaluator,
                                                     Strategies, evaluator_parent_inspection)
         self.run_results = []
         self.results_report = []
@@ -66,6 +69,8 @@ class StrategyOptimizer:
         self.is_computing = False
         self.run_id = 0
         self.total_nb_runs = 0
+
+        self._create_matrix_channel_if_necessary()
 
         if not self.strategy_class:
             self.logger.error(f"Impossible to find a strategy matching class name: {strategy_name} in installed "
@@ -162,6 +167,11 @@ class StrategyOptimizer:
             raise RuntimeError(f"{self.get_name()} is already computing: processed "
                                f"{self.run_id}/{self.total_nb_runs} processed")
 
+    @staticmethod
+    def _create_matrix_channel_if_necessary():
+        if not matrix_channel_exists():
+            asyncio.run(create_matrix_channels())
+
     def _run_test_suite(self, config):
         self.current_test_suite = StrategyTestSuite()
         self.current_test_suite.initialize_with_strategy(self.strategy_class, copy.deepcopy(config))
@@ -186,7 +196,7 @@ class StrategyOptimizer:
                 results_through_all_time_frame[result_summary][RANK] += rank
                 results_through_all_time_frame[result_summary][TRADES] += result.trades_counts
 
-        result_list = [(result, trades_and_rank[RANK], DataUtil.mean(trades_and_rank[TRADES]))
+        result_list = [(result, trades_and_rank[RANK], mean(trades_and_rank[TRADES]))
                        for result, trades_and_rank in results_through_all_time_frame.items()]
         self.sorted_results_through_all_time_frame = sorted(result_list, key=lambda res: res[RANK])
 
@@ -214,6 +224,9 @@ class StrategyOptimizer:
 
     def get_overall_progress(self):
         return int((self.run_id-1) / self.total_nb_runs * 100) if self.total_nb_runs else 0
+
+    def is_in_progress(self):
+        return self.get_overall_progress() != 100
 
     def get_current_test_suite_progress(self):
         return self.current_test_suite.get_progress() if self.current_test_suite else 0
